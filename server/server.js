@@ -1,11 +1,65 @@
 const express = require('express');
 const cors = require('cors');
 const db = require('./database');
+const { GoogleGenAI } = require("@google/genai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Initialize Gemini AI on the server side
+const aiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+const genAI = aiKey ? new GoogleGenAI(aiKey) : null;
+
+// Helper function for AI matching fallback
+function getLocalFallbackReason(user, trip) {
+    const skills = user.skills || [];
+    const needs = user.accessibilityNeeds || [];
+    const matchingSkills = skills.filter(s => trip.tutoringSubject?.toLowerCase().includes(s.toLowerCase()));
+    const needsAssistance = needs.length > 0 && trip.assistanceOffered;
+
+    if (needsAssistance) {
+        return `Questo viaggio supporta la Missione 5 del PNRR: il conducente offre l'assistenza specifica di cui hai bisogno per un tragitto inclusivo.`;
+    }
+    if (matchingSkills.length > 0 && trip.tutoringSubject) {
+        return `Match perfetto per la Missione 4! Puoi ripassare ${trip.tutoringSubject} durante il tragitto, ottimizzando il tuo tempo di studio.`;
+    }
+    if (trip.tutoringSubject) {
+        return `Interessante opportunità di Peer Tutoring (Missione 4) in ${trip.tutoringSubject} per ampliare le tue conoscenze durante lo spostamento.`;
+    }
+    return `Ottima scelta per la Missione 3: riduci le emissioni di CO2 e accumuli crediti per la tua mobilità sostenibile universitaria.`;
+}
+
+// AI Match reasoning endpoint
+app.post('/api/ai/match-reason', async (req, res) => {
+    const { user, trip } = req.body;
+    
+    if (!genAI) {
+        return res.json({ reason: getLocalFallbackReason(user, trip) });
+    }
+
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const prompt = `
+            Agisci come un assistente di mobilità inclusiva. 
+            Analizza questo match tra un utente e un viaggio:
+            UTENTE: ${user.name}, Competenze: ${(user.skills || []).join(', ')}, Bisogni: ${(user.accessibilityNeeds || []).join(', ')}.
+            VIAGGIO: Da ${trip.from} a ${trip.to}, Tutoring offerto in: ${trip.tutoringSubject || 'Nessuno'}, Assistenza disabili: ${trip.assistanceOffered ? 'Sì' : 'No'}.
+            
+            Spiega in una sola frase breve e incoraggiante perché questo viaggio è ideale per l'utente, citando i benefici PNRR (Missione 4: studio, Missione 5: inclusione).
+        `;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text().trim();
+        
+        res.json({ reason: text || getLocalFallbackReason(user, trip) });
+    } catch (error) {
+        console.error("Gemini Server Error:", error.message);
+        res.json({ reason: getLocalFallbackReason(user, trip) });
+    }
+});
 
 // --- Users ---
 app.get('/api/users', async (req, res) => {
@@ -196,27 +250,15 @@ app.post('/api/credit-logs', async (req, res) => {
     }
 });
 
-// --- Train Study Groups ---
-
 // Proxy for Real-Time Train Data (ViaggiaTreno)
 app.get('/api/trains/departures/:stationId', async (req, res) => {
     const stationId = req.params.stationId;
-    // Accept time as query param (timestamp in ms or ISO)
     let timestamp = Date.now();
     if (req.query.time) {
-        // If it's a date string, convert to ms
         const parsed = new Date(req.query.time).getTime();
         if (!isNaN(parsed)) timestamp = parsed;
     }
-
-    // Using the SoluzioniViaggioNew/Partenze endpoint pattern which appears to accept a timestamp for the starting view
-    // Format: http://www.viaggiatreno.it/infomobilita/resteasy/viaggiatreno/partenze/{stationId}/{timestamp_string}
-    // The API is known to accept standard date strings format roughly like "Wed Feb 01 2023 10:00:00 GMT+0100"
-    // Let's formatting it to standard English date string which JS toString() often provides close enough, 
-    // or specifically format it if needed.
     const dateObj = new Date(timestamp);
-    // ViaggiaTreno expects: Mon Dec 02 2024 15:35:00 GMT+0100 (Central European Standard Time)
-    // We can try sending the basic toString()
     const url = `http://www.viaggiatreno.it/infomobilita/resteasy/viaggiatreno/partenze/${stationId}/${encodeURIComponent(dateObj.toString())}`;
 
     try {
@@ -268,7 +310,6 @@ app.post('/api/study-groups', async (req, res) => {
 app.post('/api/study-groups/:id/join', async (req, res) => {
     const { userId } = req.body;
     try {
-        // 1. Get current members
         const rows = await db.query('SELECT members, maxMembers FROM study_groups WHERE id = ?', [req.params.id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Group not found' });
 
@@ -277,15 +318,12 @@ app.post('/api/study-groups/:id/join', async (req, res) => {
         if (members.length >= rows[0].maxMembers) return res.status(400).json({ error: 'Group full' });
 
         members.push(userId);
-
-        // 2. Update
         await db.query('UPDATE study_groups SET members = ? WHERE id = ?', [JSON.stringify(members), req.params.id]);
         res.json({ message: 'Joined group', members });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
-
 
 module.exports = app;
 

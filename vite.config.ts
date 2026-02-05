@@ -17,9 +17,9 @@ export default defineConfig(({ mode }) => {
       }
     },
     plugins: [react()],
+    // Security Fix: Removed process.env.API_KEY injection into client bundle
     define: {
-      'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      'process.env.NODE_ENV': JSON.stringify(mode)
     },
     resolve: {
       alias: {
